@@ -17,16 +17,16 @@ class PlacementSummary(object):
     # ... many newlines of anything here ...
     #                              - 0x20007588   0x7588
     _blockDefRe = re.compile(
-        r"\"([A-Z0-9]+)\":\s+0x([0-9a-f]+)([^-]*)\n\s+-\s0x([0-9a-f]+)\s+0x([0-9a-f]+)",
+        r"\"(P[0-9]+)\":\s+0x([0-9a-f]+)((.(?!\n\n))*)\n\s+-\s0x([0-9a-f]+)\s+0x([0-9a-f]+)",
         flags=re.DOTALL)
     # format and unpack regex match
-    _unpackBlock = lambda n,s,c,e,u: {
+    _unpackBlock = staticmethod(lambda n,s,c,cS,e,u: {
         "name": n,
         "size": int(s, 16),
         "contents": c,
         "end": int(e, 16),
         "unused": int(u, 16),
-    }
+    })
     # Regex designed to match:
     #   .text               ro code  0x000040a0   0x288c  SensorFusionMobile.cpp.obj [6]
     _objectRe = re.compile(
@@ -35,7 +35,7 @@ class PlacementSummary(object):
         r"([A-Za-z0-9._<>]+)(\s\[([0-9]+)\])?", # object, moduleStr*, moduleRef*
         flags=re.MULTILINE)
     # format and unpack regex match
-    _unpackObject = lambda se,b,kS,k,a,sz,n,mS,mR: {
+    _unpackObject = staticmethod(lambda se,b,kS,k,a,sz,n,mS,mR: {
         "section": se.strip(),
         "block": "ro" if se == "const" else b,
         "kind": k.strip(),
@@ -43,7 +43,7 @@ class PlacementSummary(object):
         "size": int(sz, 16),
         "object": n,
         "moduleRef": mR
-    }
+    })
 
     def __init__(self, placementSummaryContents):
         self.contents = placementSummaryContents
@@ -77,17 +77,16 @@ class PlacementSummary(object):
     def _parsePlacement(self):
         objectMap = {}
         for (blockName, objDict) in self._getObjectsByBlock():
-            if not blockName.startswith("P"):
-                continue
             if objDict["kind"] == "":
                 continue
+            if objDict["size"] == 0:
+                continue
+            objDict["block"] = blockName
             objAddr = objDict.pop("addr")
-            if not blockName in objectMap:
-                objectMap[blockName] = {}
-            if objAddr in objectMap[blockName]:
+            if objAddr in objectMap:
                 raise KeyError("Object address double clounted: {}".format(hex(objAddr)))
-            objectMap[blockName][objAddr] = objDict
-        self.objectTable = pandas.Panel(objectMap)
+            objectMap[objAddr] = objDict
+        self.objectTable = pandas.DataFrame(objectMap)
 
 
 class MapFileHelper(object):
