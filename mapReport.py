@@ -17,32 +17,31 @@ class PlacementSummary(object):
     # ... many newlines of anything here ...
     #                              - 0x20007588   0x7588
     _blockDefRe = re.compile(
-        r"\"(P[0-9]+)\":\s+0x([0-9a-f]+)((.(?!\n\n))*)\n\s+-\s0x([0-9a-f]+)\s+0x([0-9a-f]+)",
+        r"\"(P[0-9]+)\":\s+0x([0-9a-f]+)((.(?!\n\n))*)\n\s+-\s0x([0-9a-f]+)\s+0x[0-9a-f]+",
         flags=re.DOTALL)
     # format and unpack regex match
-    _unpackBlock = staticmethod(lambda n,s,c,cS,e,u: {
+    _unpackBlock = staticmethod(lambda n,s,c,cS,e: {
         "name": n,
         "size": int(s, 16),
         "contents": c,
-        "end": int(e, 16),
-        "unused": int(u, 16),
+        "end": int(e, 16)
     })
     # Regex designed to match:
     #   .text               ro code  0x000040a0   0x288c  SensorFusionMobile.cpp.obj [6]
     _objectRe = re.compile(
         r"\s(.{20})\s([a-z]+)?(\s([a-z]+)\s\s)?\s+" + # name, block*, kindStr*, kind* ; * = optional
         r"0x([a-f0-9]{8})\s{1,6}0x([a-f0-9]{1,6})\s\s"+ # addr, size, 
-        r"([A-Za-z0-9._<>]+)(\s\[([0-9]+)\])?", # object, moduleStr*, moduleRef*
+        r"([A-Za-z0-9._<>\s]+)(\s\[([0-9]+)\])?", # object, moduleStr*, moduleRef*
         flags=re.MULTILINE)
     # format and unpack regex match
-    _unpackObject = staticmethod(lambda se,b,kS,k,a,sz,n,mS,mR: {
+    _unpackObject = staticmethod(lambda se,kM,kS,k,a,sz,n,mS,mR: {
         "section": se.strip(),
-        "block": "ro" if se == "const" else b,
-        "kind": k.strip(),
+        "kindMod": kM,
+        "kind": k,
         "addr": int(a, 16),
         "size": int(sz, 16),
         "object": n,
-        "moduleRef": mR
+        "module": mR if mR != "" else se.strip()
     })
 
     def __init__(self, placementSummaryContents):
@@ -63,6 +62,7 @@ class PlacementSummary(object):
                 'endAddr': int(endAddr, 16),
                 'sections': sections
             }
+            blocks[label]["size"] = blocks[label]["endAddr"] - blocks[label]["startAddr"]
         self.blockTable = pandas.DataFrame(blocks)
 
     def _getObjectsByBlock(self):
@@ -73,6 +73,21 @@ class PlacementSummary(object):
             for obj in objs:
                 objDict = PlacementSummary._unpackObject(*obj)
                 yield (blockDict["name"], objDict)
+
+            totalBlockSize = self.blockTable[blockDict["name"]]["size"]
+            unusedSize = totalBlockSize - blockDict["size"]
+            print("totalBlockSize", totalBlockSize, "usedSize", blockDict["size"], "unusedSize", unusedSize)
+            # Yield the unused block as an object
+            unusedObject = {
+                "section": "unused",
+                "kindMod": "",
+                "kind": "unused",
+                "addr": blockDict["end"],
+                "size": unusedSize,
+                "object": "unused",
+                "module": "unused"
+            }
+            yield(blockDict["name"], unusedObject)
 
     def _parsePlacement(self):
         objectMap = {}
@@ -86,7 +101,7 @@ class PlacementSummary(object):
             if objAddr in objectMap:
                 raise KeyError("Object address double clounted: {}".format(hex(objAddr)))
             objectMap[objAddr] = objDict
-        self.objectTable = pandas.DataFrame(objectMap)
+        self.objectTable = pandas.DataFrame(objectMap).T
 
 
 class MapFileHelper(object):

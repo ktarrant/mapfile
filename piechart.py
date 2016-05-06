@@ -1,4 +1,4 @@
-from mapReport2 import MapFileHelper
+from mapReport import MapFileHelper
 import logging
 import plotly.offline as py
 from plotly.graph_objs import *
@@ -9,25 +9,33 @@ with open("FSP312.map", 'r') as fobj:
 blockTable = (mapFile.placement.blockTable)
 # print(blockTable)
 objectTable = (mapFile.placement.objectTable)
+# print(objectTable)
 
-tableP2 = (objectTable["P2"])
-sztable = tableP2.loc[["object", "size"]]
-print(sztable)
-#print(tableP2.pivot("object", "size"))
+roTable = objectTable[objectTable["block"] == "P1"]
+print(roTable)
+rwTable = objectTable[objectTable["block"] == "P2"]
+print(rwTable)
 
 fig = {
     'data': [
         {
-            'labels': tableP2.loc[["object"]].values[0],
-            'values': tableP2.loc[["size"]].values[0],
+            'labels': roTable["object"],
+            'values': roTable["size"],
             'type': 'pie',
-            'name': 'P2',
-            'hoverinfo':'label+percent+name',
-            'textinfo':'none'
+            'name': 'readonly',
+            'textposition':'inside',
+            'domain': {'x': [0, 0.5], 'y': [0.5, 1]},
+        },
+        {
+            'labels': rwTable["object"],
+            'values': rwTable["size"],
+            'type': 'pie',
+            'name': 'readwrite',
+            'textposition':'inside',
+            'domain': {'x': [0.5, 1], 'y': [0.5, 1]},
         },
     ],
-    'layout': {'title': 'Code Size Usage',
-               'showlegend': False}
+    'layout': {'title': 'Code Size Usage'}
 }
 
-url = py.plot(fig, filename='Pie Chart Subplot Example')
+url = py.plot(fig, filename='CodeSize.html')
