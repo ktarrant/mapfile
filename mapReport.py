@@ -1,6 +1,7 @@
 import re
 import logging
 import pandas
+import numpy as np
 
 log = logging.getLogger(__name__)
 
@@ -10,14 +11,16 @@ class PlacementSummary(object):
     #           rw, block CSTACK, block HEAP, section .noinit };
     _placeRe = (
         re.compile(
-            r'"([A-Z0-9]{2})":  place in \[from 0x([0-9a-z]+) to 0x([0-9a-z]+)\] \{([^{}]+)\};',
+            r'"([A-Z0-9]{2})":  place in \[from 0x([0-9a-z]+) to 0x([0-9a-z]+)\]\s' +
+            r"(\|\n\s+\[from 0x([0-9a-z]+) to 0x([0-9a-z]+)\]\s)?" +
+            r"\{([^{}]+)\};",
             flags=re.DOTALL))
     # Regex designed to match:
     # "P1":                                      0x2ce6b
     # ... many newlines of anything here ...
     #                              - 0x20007588   0x7588
     _blockDefRe = re.compile(
-        r"\"(P[0-9]+)\":\s+0x([0-9a-f]+)((.(?!\n\n))*)\n\s+-\s0x([0-9a-f]+)\s+0x[0-9a-f]+",
+        r"\"(P[0-9]+)\"(?:, part [0-9]+ of [0-9]+)?\:\s+0x([0-9a-f]+)((.(?!\n\n))*)\n\s+-\s0x([0-9a-f]+)\s+0x[0-9a-f]+",
         flags=re.DOTALL)
     # format and unpack regex match
     _unpackBlock = staticmethod(lambda n,s,c,cS,e: {
@@ -29,10 +32,10 @@ class PlacementSummary(object):
     # Regex designed to match:
     #   .text               ro code  0x000040a0   0x288c  SensorFusionMobile.cpp.obj [6]
     _objectRe = re.compile(
-        r"\s(.{20})\s([a-z]+)?(\s([a-z]+)\s\s)?\s+" + # name, block*, kindStr*, kind* ; * = optional
+        r"\s(.{20})\s([a-z]+)?(\s([a-z]+)\s)?\s+" + # name, block*, kindStr*, kind* ; * = optional
         r"0x([a-f0-9]{8})\s{1,6}0x([a-f0-9]{1,6})\s\s"+ # addr, size, 
-        r"([A-Za-z0-9._<>\s]+)(\s\[([0-9]+)\])?", # object, moduleStr*, moduleRef*
-        flags=re.MULTILINE)
+        r"([^[\n]+)(\[([0-9]+)\])?", # object, moduleStr*, moduleRef*
+        flags=re.DOTALL)
     # format and unpack regex match
     _unpackObject = staticmethod(lambda se,kM,kS,k,a,sz,n,mS,mR: {
         "section": se.strip(),
@@ -40,8 +43,8 @@ class PlacementSummary(object):
         "kind": k,
         "addr": int(a, 16),
         "size": int(sz, 16),
-        "object": n,
-        "module": mR if mR != "" else se.strip()
+        "object": n.strip(),
+        "module": se.strip() if mR == None else mR,
     })
 
     def __init__(self, placementSummaryContents):
@@ -52,7 +55,8 @@ class PlacementSummary(object):
 
     def _parseBlocks(self):
         blocks = {}
-        for (label, startAddr, endAddr, sectionStr) in self._placeRe.findall(self.contents):
+        matches = self._placeRe.findall(self.contents)
+        for (label, startAddr, endAddr, extraAddrs, xStartAddr, xEndAddr, sectionStr) in matches:
             # split by column, then chop off the section type.
             # for instance "block HEAP" -> "HEAP"
             cleanAndChop = lambda s: s.strip().split(" ")[-1]
@@ -63,46 +67,62 @@ class PlacementSummary(object):
                 'sections': sections
             }
             blocks[label]["size"] = blocks[label]["endAddr"] - blocks[label]["startAddr"]
+            if extraAddrs != "":
+                blocks[label]["size"] += int(xEndAddr, 16) - int(xStartAddr, 16)
+
         self.blockTable = pandas.DataFrame(blocks)
-
-    def _getObjectsByBlock(self):
-        blocks = self._blockDefRe.findall(self.contents)
-        for block in blocks:
-            blockDict = PlacementSummary._unpackBlock(*block)
-            objs = self._objectRe.findall(blockDict["contents"])
-            for obj in objs:
-                objDict = PlacementSummary._unpackObject(*obj)
-                yield (blockDict["name"], objDict)
-
-            totalBlockSize = self.blockTable[blockDict["name"]]["size"]
-            unusedSize = totalBlockSize - blockDict["size"]
-            print("totalBlockSize", totalBlockSize, "usedSize", blockDict["size"], "unusedSize", unusedSize)
-            # Yield the unused block as an object
-            unusedObject = {
-                "section": "unused",
-                "kindMod": "",
-                "kind": "unused",
-                "addr": blockDict["end"],
-                "size": unusedSize,
-                "object": "unused",
-                "module": "unused"
-            }
-            yield(blockDict["name"], unusedObject)
 
     def _parsePlacement(self):
         objectMap = {}
-        for (blockName, objDict) in self._getObjectsByBlock():
-            if objDict["kind"] == "":
-                continue
-            if objDict["size"] == 0:
-                continue
-            objDict["block"] = blockName
-            objAddr = objDict.pop("addr")
-            if objAddr in objectMap:
-                raise KeyError("Object address double clounted: {}".format(hex(objAddr)))
-            objectMap[objAddr] = objDict
-        self.objectTable = pandas.DataFrame(objectMap).T
+        blockMatches = self._blockDefRe.findall(self.contents)
+        blockDicts = [PlacementSummary._unpackBlock(*block)
+            for block in blockMatches]
+        for blockDict in blockDicts:
+            lines = blockDict["contents"].split("\n")
+            for line in lines:
+                if line == "":
+                    continue
+                try:
+                    obj = PlacementSummary._objectRe.search(line)
+                    objDict = PlacementSummary._unpackObject(*obj.groups())
+                except TypeError, ValueError:
+                    log.error("Failed to parse line: '{}'".format(line))
+                    continue
+                if objDict["kind"] == None and objDict["kindMod"] == None:
+                    log.warn("Skipped (nokind): '{}'".format(objDict["object"]))
+                    continue
+                if objDict["size"] == 0:
+                    log.warn("Skipped (nosize): '{}'".format(objDict["object"]))
+                    continue
+                if objDict["kind"] == None and objDict["object"].startswith("<"):
+                    objDict["kind"] = objDict["object"]
+                    objDict["object"] = objDict["section"]
+                objDict["block"] = blockDict["name"]
+                objAddr = objDict.pop("addr")
+                if objAddr in objectMap:
+                    raise KeyError("Object address double counted: {}".format(hex(objAddr)))
+                objectMap[objAddr] = objDict
 
+        self.objectTable = pandas.DataFrame(objectMap).T
+        blockSizeTable = self.objectTable.pivot_table(values="size", index=['block'], aggfunc=np.sum)
+        for blockName in blockSizeTable.index:
+            unusedAddr = 0
+            for blockDict in blockDicts:
+                if blockDict["name"] == blockName:
+                    unusedAddr = blockDict["end"]
+                    break
+            totalBlockSize = self.blockTable[blockName]["size"]
+            unusedSize = totalBlockSize - blockSizeTable[blockName]
+            # Yield the unused block as an object
+            self.objectTable = self.objectTable.append(pandas.Series({
+                "section" : "unused",
+                "kindMod" : "",
+                "kind"    : "unused",
+                "size"    : unusedSize,
+                "object"  : "unused",
+                "module"  : "unused",
+                "block"   : blockName,
+            }), ignore_index=True)
 
 class MapFileHelper(object):
     # Regex designed to match:
@@ -133,7 +153,7 @@ class MapFileHelper(object):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
-    with open("FSP312.map", 'r') as fobj:
+    with open("FSP314.map", 'r') as fobj:
         mapFile = MapFileHelper(fobj.read())
     blockTable = (mapFile.placement.blockTable)
     print(blockTable)
