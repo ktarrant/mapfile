@@ -80,7 +80,7 @@ def makePieChartsFromMapFile(mapFilePath, outputPath):
                 'name': 'readonly',
                 'textposition':'inside',
                 'domain': {'x': [outerRadius, innerRadius], 'y': [0.2, 0.8]},
-                'hole': 0.35,
+                'hole': 0.3,
                 # 'sort': False,
             },
             {

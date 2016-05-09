@@ -1,9 +1,27 @@
 import re
 import logging
 import pandas
+from teamcity import is_running_under_teamcity
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+class ModuleSummary(object):
+    # Regex designed to match:
+    # command line: [2]
+    _moduleRe = re.compile(r"(.*):\s\[([0-9]+)\]")
+
+    def __init__(self, moduleSummaryContents):
+        self.contents = moduleSummaryContents
+
+        self._parseModules()
+
+    def _parseModules(self):
+        moduleMatches = ModuleSummary._moduleRe.findall(self.contents)
+        self.modules = { int(moduleId): moduleName for (moduleName, moduleId) in moduleMatches }
+        self.modules[1] = "FSP3xx"
+        print(self.modules)
+
 
 class PlacementSummary(object):
     # Regex designed to match:
@@ -32,7 +50,7 @@ class PlacementSummary(object):
     # Regex designed to match:
     #   .text               ro code  0x000040a0   0x288c  SensorFusionMobile.cpp.obj [6]
     _objectRe = re.compile(
-        r"\s(.{20})\s([a-z]+)?(\s([a-z]+)\s)?\s+" + # name, block*, kindStr*, kind* ; * = optional
+        r"\s(.{20})\s([a-z]{2}\s)?(([a-z]+)\s)?\s+" + # name, block*, kindStr*, kind* ; * = optional
         r"0x([a-f0-9]{8})\s{1,6}0x([a-f0-9]{1,6})\s\s"+ # addr, size, 
         r"([^[\n]+)(\[([0-9]+)\])?", # object, moduleStr*, moduleRef*
         flags=re.DOTALL)
@@ -47,8 +65,9 @@ class PlacementSummary(object):
         "module": se.strip() if mR == None else mR,
     })
 
-    def __init__(self, placementSummaryContents):
+    def __init__(self, placementSummaryContents, moduleSummary):
         self.contents = placementSummaryContents
+        self.moduleSummary = moduleSummary
 
         self._parseBlocks()
         self._parsePlacement()
@@ -78,6 +97,7 @@ class PlacementSummary(object):
         blockDicts = [PlacementSummary._unpackBlock(*block)
             for block in blockMatches]
         for blockDict in blockDicts:
+            blockKindMod = "ro" if blockDict["name"] == "P1" else "rw"
             lines = blockDict["contents"].split("\n")
             for line in lines:
                 if line == "":
@@ -85,17 +105,30 @@ class PlacementSummary(object):
                 try:
                     obj = PlacementSummary._objectRe.search(line)
                     objDict = PlacementSummary._unpackObject(*obj.groups())
-                except TypeError, ValueError:
+                except TypeError:
                     log.error("Failed to parse line: '{}'".format(line))
                     continue
-                if objDict["kind"] == None and objDict["kindMod"] == None:
+                except ValueError:
+                    log.error("Failed to parse line: '{}'".format(line))
+                    continue
+                if objDict["kind"] == None:
                     log.warn("Skipped (nokind): '{}'".format(objDict["object"]))
                     continue
                 if objDict["size"] == 0:
                     log.warn("Skipped (nosize): '{}'".format(objDict["object"]))
                     continue
-                if objDict["kind"] == None and objDict["object"].startswith("<"):
-                    objDict["kind"] = objDict["object"]
+                if objDict["kindMod"] == None:
+                    objDict["kindMod"] = blockKindMod
+                else:
+                    objDict["kindMod"] = objDict["kindMod"].strip()
+                    assert objDict["kindMod"] == blockKindMod, "{} != {}".format(
+                        objDict["kindMod"], blockKindMod)
+                try:
+                    moduleId = int(objDict["module"])
+                    objDict["module"] = self.moduleSummary.modules[moduleId]
+                except ValueError:
+                    pass
+                if objDict["object"].startswith("<"):
                     objDict["object"] = objDict["section"]
                 objDict["block"] = blockDict["name"]
                 objAddr = objDict.pop("addr")
@@ -116,7 +149,7 @@ class PlacementSummary(object):
             # Yield the unused block as an object
             self.objectTable = self.objectTable.append(pandas.Series({
                 "section" : "unused",
-                "kindMod" : "",
+                "kindMod" : "ro" if blockDict["name"] == "P1" else "rw",
                 "kind"    : "unused",
                 "size"    : unusedSize,
                 "object"  : "unused",
@@ -149,13 +182,27 @@ class MapFileHelper(object):
         self._makeSectionHelpers()
 
     def _makeSectionHelpers(self):
-        self.placement = PlacementSummary(self.sections["PLACEMENT SUMMARY"])
+        self.module = ModuleSummary(self.sections["MODULE SUMMARY"])
+        self.placement = PlacementSummary(self.sections["PLACEMENT SUMMARY"], self.module)
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Extracts information from Map files.")
+    parser.add_argument("mapfile", help="Path to map file to parse.")
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.DEBUG)
-    with open("FSP314.map", 'r') as fobj:
+    with open(args.mapfile, 'r') as fobj:
         mapFile = MapFileHelper(fobj.read())
+
     blockTable = (mapFile.placement.blockTable)
-    print(blockTable)
     objectTable = (mapFile.placement.objectTable)
-    print(objectTable)
+
+    if is_running_under_teamcity():
+        pass
+    else:
+        print(blockTable)
+        print(objectTable)
+
+
