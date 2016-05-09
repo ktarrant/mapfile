@@ -3,6 +3,7 @@ import logging
 import pandas
 from teamcity import is_running_under_teamcity
 import numpy as np
+import os
 
 log = logging.getLogger(__name__)
 
@@ -11,16 +12,16 @@ class ModuleSummary(object):
     # command line: [2]
     _moduleRe = re.compile(r"(.*):\s\[([0-9]+)\]")
 
-    def __init__(self, moduleSummaryContents):
+    def __init__(self, moduleSummaryContents, deviceName="FSP3xx"):
         self.contents = moduleSummaryContents
+        self.deviceName = deviceName
 
         self._parseModules()
 
     def _parseModules(self):
         moduleMatches = ModuleSummary._moduleRe.findall(self.contents)
         self.modules = { int(moduleId): moduleName for (moduleName, moduleId) in moduleMatches }
-        self.modules[1] = "FSP3xx"
-        print(self.modules)
+        self.modules[1] = self.deviceName
 
 
 class PlacementSummary(object):
@@ -164,8 +165,9 @@ class MapFileHelper(object):
     # ***
     _mainHeaderRe = re.compile(r"\*{79}\n\*{3}\s(.*)\n\*{3}")
 
-    def __init__(self, mapFileContents):
+    def __init__(self, mapFileContents, deviceName="FSP3xx"):
         self.sections = {}
+        self.deviceName = deviceName
         remainingText = mapFileContents
         thisHeader = MapFileHelper._mainHeaderRe.search(remainingText)
         while thisHeader != None:
@@ -182,27 +184,48 @@ class MapFileHelper(object):
         self._makeSectionHelpers()
 
     def _makeSectionHelpers(self):
-        self.module = ModuleSummary(self.sections["MODULE SUMMARY"])
+        self.module = ModuleSummary(self.sections["MODULE SUMMARY"], deviceName=self.deviceName)
         self.placement = PlacementSummary(self.sections["PLACEMENT SUMMARY"], self.module)
+
+def tc_buildStatistic(devname, mode, key, value):
+    fullKey = key = ".".join([devname, mode, key])
+    return "##teamcity[buildStatisticValue key='{}' value='{}']".format(fullKey, value)
+
+def to_teamcity(df, devname):
+    for ((mode, module), size) in zip(df.index, df):
+        module = module.replace(".", "_").replace(" ", "")
+        print(tc_buildStatistic(devname, mode, module, size))
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Extracts information from Map files.")
     parser.add_argument("mapfile", help="Path to map file to parse.")
+    parser.add_argument("--tc", help="Use TeamCity output.", action="store_true")
+    parser.add_argument("--devname", help="Label for the chip executable")
     args = parser.parse_args()
+
+    basename = os.path.basename(args.mapfile)
+    if not args.devname:
+        args.devname = basename.split(".")[0]
 
     logging.basicConfig(level=logging.DEBUG)
     with open(args.mapfile, 'r') as fobj:
-        mapFile = MapFileHelper(fobj.read())
+        mapFile = MapFileHelper(fobj.read(), deviceName=args.devname)
 
     blockTable = (mapFile.placement.blockTable)
     objectTable = (mapFile.placement.objectTable)
+    modTable = objectTable.pivot_table(values="size", 
+        index=['kindMod', 'module'], aggfunc=np.sum)
 
-    if is_running_under_teamcity():
-        pass
+    if args.tc or is_running_under_teamcity():
+        # print(blockTable)
+        # print(modTable)
+        print(tc_buildStatistic(args.devname, "ro", "total", blockTable["P1"]["size"]))
+        print(tc_buildStatistic(args.devname, "rw", "total", blockTable["P2"]["size"]))
+        to_teamcity(modTable, args.devname)
     else:
         print(blockTable)
-        print(objectTable)
+        print(modTable)
 
 
